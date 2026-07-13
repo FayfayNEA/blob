@@ -2,5 +2,6 @@ node_modules/
 package-lock.json
 package.json
 debug-orb.png
+ref-frames/
 .DS_Store
 *.log
