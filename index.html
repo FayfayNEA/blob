@@ -59,6 +59,43 @@
       background: rgba(30, 70, 45, 0.9);
       border-color: rgba(120, 220, 150, 0.55);
     }
+    .ui .divider {
+      width: 1px;
+      align-self: stretch;
+      background: rgba(255, 255, 255, 0.12);
+      margin: 4px 2px;
+    }
+    .ui input[type="text"] {
+      width: 118px;
+      padding: 10px 14px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 999px;
+      background: rgba(20, 20, 20, 0.85);
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .ui input[type="text"]:focus {
+      border-color: rgba(255, 255, 255, 0.45);
+    }
+    .ui input[type="text"]::placeholder {
+      color: rgba(255, 255, 255, 0.4);
+      text-transform: none;
+      letter-spacing: 0.02em;
+    }
+    .ui input[type="color"] {
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 999px;
+      background: rgba(20, 20, 20, 0.85);
+      cursor: pointer;
+    }
+    .ui input[type="color"]::-webkit-color-swatch-wrapper { padding: 4px; }
+    .ui input[type="color"]::-webkit-color-swatch { border: none; border-radius: 999px; }
   </style>
 </head>
 <body>
@@ -67,6 +104,11 @@
     <button id="btn-silver" data-palette="1">Silver</button>
     <button id="btn-pink" data-palette="2">Pink</button>
     <button id="btn-green" data-palette="3">Green</button>
+    <span class="divider"></span>
+    <input id="custom-hex" type="text" placeholder="#hex or name" spellcheck="false" />
+    <input id="custom-color" type="color" value="#b98ac4" title="Pick a color" />
+    <span class="divider"></span>
+    <button id="btn-download" title="Download a PNG of the orb">Download</button>
   </div>
 
   <script type="importmap">
@@ -197,12 +239,21 @@
         vec4 world = modelMatrix * vec4(local, 1.0);
         vWorldPos = world.xyz;
 
-        float e = 0.03;
-        vec3 t1 = normalize(dir + vec3(e, 0.0, 0.0));
-        vec3 t2 = normalize(dir + vec3(0.0, e, 0.0));
-        vec3 p1 = t1 * (1.0 + shellDisp(t1, uTime));
-        vec3 p2 = t2 * (1.0 + shellDisp(t2, uTime));
-        vNormal = normalize(normalMatrix * normalize(cross(p1 - local, p2 - local)));
+        // build an orthonormal tangent basis perpendicular to dir so the
+        // finite-difference normal never degenerates (no seam / hemisphere flip)
+        vec3 ref = abs(dir.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tang = normalize(cross(ref, dir));
+        vec3 bitang = cross(dir, tang);
+
+        float e = 0.02;
+        vec3 d1 = normalize(dir + tang * e);
+        vec3 d2 = normalize(dir + bitang * e);
+        vec3 p1 = d1 * (1.0 + shellDisp(d1, uTime));
+        vec3 p2 = d2 * (1.0 + shellDisp(d2, uTime));
+        vec3 nrm = normalize(cross(p1 - local, p2 - local));
+        // guarantee it points outward
+        nrm *= sign(dot(nrm, dir));
+        vNormal = normalize(normalMatrix * nrm);
 
         gl_Position = projectionMatrix * viewMatrix * world;
       }
@@ -211,6 +262,8 @@
     const fragmentShader = /* glsl */`
       uniform float uTime;
       uniform int uPalette;
+      uniform int uUseCustom;
+      uniform vec3 uCustom;
       uniform vec3 uCameraLocal;
 
       varying vec3 vWorldPos;
@@ -242,7 +295,14 @@
         float fresnel = pow(1.0 - ndv, 2.0);
 
         vec3 voidTone, bodyTone, paleTone, hotTone;
-        if (uPalette == 0) {
+        if (uUseCustom == 1) {
+          // derive a coherent palette from any typed-in color
+          vec3 base = uCustom;
+          bodyTone = base;
+          voidTone = base * 0.42;
+          paleTone = mix(base, vec3(1.0), 0.72);
+          hotTone  = mix(base, vec3(1.0), 0.9);
+        } else if (uPalette == 0) {
           // purple / mauve
           voidTone = vec3(0.42, 0.30, 0.38);
           bodyTone = vec3(0.74, 0.58, 0.66);
@@ -303,42 +363,46 @@
           float lit    = smoothstep(0.05, 0.75, toneN);
           float shaded = smoothstep(0.15, 0.9, -toneN);
 
+          // sheet bodies stay in the pink/body range; only the thin
+          // crest lines are allowed to reach the pale/hot tones
           vec3 c = bodyTone;
-          c = mix(c, paleTone, lit * 0.85);
+          c = mix(c, paleTone, lit * 0.45);
           c = mix(c, voidTone, shaded * 0.55);
-          c = mix(c, hotTone, crest * (0.55 + lit * 0.45));
+          c = mix(c, hotTone, crest * (0.6 + lit * 0.4));
 
           // opacity of this slab
-          float a = clamp(sheet * 0.6 + crest * 0.85, 0.0, 1.0);
+          float a = clamp(sheet * 0.55 + crest * 0.85, 0.0, 1.0);
 
           interior += trans * a * c;
           coverage += trans * a;
-          hotSum += trans * crest * (0.5 + lit * 0.6);
+          hotSum += trans * crest * (0.5 + lit * 0.5);
           trans *= (1.0 - a);
         }
 
         // dusky membrane shows through where folds are absent
         vec3 col = interior + trans * voidTone * 0.55;
 
-        // bloom on the caustic crests
-        hotSum = min(hotSum, 2.5);
-        float bloom = 1.0 - exp(-hotSum * 0.9);
-        col += hotTone * bloom * bloom * 0.5;
+        // bloom only from concentrated crests (thresholded so broad
+        // fold stacks don't wash the whole hemisphere to white)
+        hotSum = max(hotSum - 0.25, 0.0);
+        float bloom = 1.0 - exp(-hotSum * 0.8);
+        col += hotTone * bloom * bloom * 0.28;
 
-        // frosty grey-white shell rim, distinct from the warm interior
-        vec3 frost = mix(paleTone, vec3(0.88, 0.88, 0.91), 0.4);
-        float shellGlow = fresnel * fresnel * 0.8 + fresnel * 0.4;
+        // soft tinted shell rim (kept low so the silhouette never blows out)
+        vec3 frost = mix(paleTone, bodyTone, 0.35);
+        float shellGlow = fresnel * fresnel * 0.4 + fresnel * 0.18;
         float rimVar = 0.75 + 0.25 * snoise(normalize(vLocal) * 1.8 + vec3(t * 0.03, 0.0, 0.0));
         col += frost * shellGlow * rimVar;
 
         // see-through where empty, solid where folds stack up
-        float outAlpha = 0.2 + coverage * 0.65 + bloom * 0.12 + fresnel * 0.4;
-        gl_FragColor = vec4(col, clamp(outAlpha, 0.18, 0.97));
+        float outAlpha = 0.2 + coverage * 0.6 + bloom * 0.1 + fresnel * 0.35;
+        gl_FragColor = vec4(col, clamp(outAlpha, 0.18, 0.96));
       }
     `;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0D0D0D);
+    // transparent canvas so the CSS #0D0D0D page shows through exactly
+    // (tone mapping would otherwise darken a scene.background color)
 
     const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.1, 100);
     camera.position.set(0, 0, 3.1);
@@ -347,9 +411,11 @@
       antialias: true,
       powerPreference: 'low-power',
       preserveDrawingBuffer: true,
+      alpha: true,
     });
     renderer.setPixelRatio(1);
     renderer.setSize(innerWidth, innerHeight);
+    renderer.setClearColor(0x000000, 0);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.15;
     document.body.appendChild(renderer.domElement);
@@ -360,6 +426,8 @@
     const uniforms = {
       uTime: { value: 0 },
       uPalette: { value: 0 },
+      uUseCustom: { value: 0 },
+      uCustom: { value: new THREE.Color(0xb98ac4) },
       uCameraLocal: { value: new THREE.Vector3() },
     };
 
@@ -371,7 +439,7 @@
       depthWrite: false,
       side: THREE.FrontSide,
     });
-    blobGroup.add(new THREE.Mesh(new THREE.SphereGeometry(1, 96, 72), material));
+    blobGroup.add(new THREE.Mesh(new THREE.IcosahedronGeometry(1, 24), material));
     renderer.debug.checkShaderErrors = true;
 
     const cameraLocal = new THREE.Vector3();
@@ -410,21 +478,80 @@
       document.getElementById('btn-green'),
     ];
 
+    const colorPicker = document.getElementById('custom-color');
+    const colorHex = document.getElementById('custom-hex');
+    const tmpColor = new THREE.Color();
+
     function setPalette(mode) {
       uniforms.uPalette.value = mode;
+      uniforms.uUseCustom.value = 0;
       paletteButtons.forEach((btn, i) => {
         btn.classList.toggle('active', i === mode);
       });
     }
 
+    function applyCustom(str) {
+      // accept #hex, hex, or CSS color names
+      const val = str.trim();
+      if (!val) return false;
+      try {
+        tmpColor.set(val.startsWith('#') || /^[0-9a-fA-F]{3,8}$/.test(val) ? (val.startsWith('#') ? val : '#' + val) : val);
+      } catch (err) {
+        return false;
+      }
+      uniforms.uCustom.value.copy(tmpColor);
+      uniforms.uUseCustom.value = 1;
+      paletteButtons.forEach((btn) => btn.classList.remove('active'));
+      colorPicker.value = '#' + tmpColor.getHexString();
+      return true;
+    }
+
     paletteButtons.forEach((btn, i) => {
       btn.addEventListener('click', () => setPalette(i));
     });
+
+    colorPicker.addEventListener('input', () => {
+      applyCustom(colorPicker.value);
+      colorHex.value = colorPicker.value;
+    });
+    colorHex.addEventListener('input', () => applyCustom(colorHex.value));
+    colorHex.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyCustom(colorHex.value);
+      e.stopPropagation();
+    });
+
     window.addEventListener('keydown', (e) => {
+      const typing = document.activeElement && document.activeElement.tagName === 'INPUT';
+      if (typing) return;
       if (e.key === '1' || e.key === 'p' || e.key === 'P') setPalette(0);
       if (e.key === '2' || e.key === 's' || e.key === 'S') setPalette(1);
       if (e.key === '3' || e.key === 'k' || e.key === 'K') setPalette(2);
       if (e.key === '4' || e.key === 'g' || e.key === 'G') setPalette(3);
+    });
+
+    const downloadBtn = document.getElementById('btn-download');
+    downloadBtn.addEventListener('click', () => {
+      // render one fresh frame right before capture so the buffer is current
+      renderer.render(scene, camera);
+
+      const out = document.createElement('canvas');
+      out.width = canvas.width;
+      out.height = canvas.height;
+      const ctx = out.getContext('2d');
+      ctx.fillStyle = '#0D0D0D';
+      ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(canvas, 0, 0, out.width, out.height);
+
+      out.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `floral-orb-${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+      }, 'image/png');
     });
 
     window.addEventListener('resize', () => {
